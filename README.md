@@ -1,18 +1,26 @@
 # proxy-deepseek
 
-Local proxy that fixes DeepSeek V4 thinking-mode `reasoning_content` passback errors
-when using Claude Code, Codex CLI, or any OpenAI-compatible client via OpenRouter.
+Local proxy that fixes DeepSeek V4 thinking-mode issues when using
+Claude Code via OpenRouter:
+
+- **Protocol translation** — converts Anthropic `/v1/messages` ⇄ OpenAI `/v1/chat/completions`
+  (Claude Code speaks Anthropic; DeepSeek expects OpenAI)
+- **`reasoning_content` passback** — stores and re-injects `reasoning_content` across
+  multi-turn tool calls, preventing 400 errors
+
+Also works as a lightweight reasoning_content passback layer for OpenAI-native clients
+(Codex CLI, Cursor, etc.) via `/v1/chat/completions`.
 
 ## The Problem
 
-DeepSeek V4 (and V3.2+) thinking mode requires that `reasoning_content` from
-an assistant turn with tool calls is passed back verbatim in every subsequent
-request. OpenAI-compatible clients don't do this automatically → **400 error**
-on the 2nd+ turn.
+**For Claude Code specifically:** Two layers of incompatibility with DeepSeek:
+1. Claude Code speaks Anthropic protocol — DeepSeek expects OpenAI format
+2. DeepSeek V4 (and V3.2+) thinking mode requires `reasoning_content` from an
+   assistant turn with tool calls to be passed back verbatim in every subsequent
+   request. No client does this automatically → **400 error** on the 2nd+ turn.
 
-Additionally, DeepSeek's API has stricter message format requirements than
-OpenAI's — `content: null` with `tool_calls` is rejected, and Anthropic-format
-messages (used by Claude Code) must be converted to OpenAI format.
+**For OpenAI-native clients:** Only issue #2 applies — they already speak the
+right protocol, but still need a layer that preserves `reasoning_content`.
 
 ## What It Does
 
