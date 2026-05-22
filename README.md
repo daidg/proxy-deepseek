@@ -39,13 +39,21 @@ right protocol, but still need a layer that preserves `reasoning_content`.
 npm install
 ```
 
-Edit `.env`:
+`.env` is optional. Defaults work for OpenRouter — the proxy passes through the
+client's API key and model. Only configure overrides if needed:
 
 ```
-UPSTREAM_URL=https://openrouter.ai/api/v1/chat/completions
-UPSTREAM_API_KEY=***
-UPSTREAM_MODEL=deepseek/deepseek-v4-flash
-DEBUG=0
+# Override upstream (default: OpenRouter)
+# UPSTREAM_URL=https://api.deepseek.com/v1/chat/completions
+
+# Fallback API key (only used when client doesn't send one)
+# UPSTREAM_API_KEY=***
+
+# Force a specific model (otherwise uses the client's model)
+# UPSTREAM_MODEL=deepseek/deepseek-v4-flash
+
+# Enable debug logging
+# DEBUG=1
 ```
 
 ## Run
