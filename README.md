@@ -8,19 +8,14 @@ Claude Code via OpenRouter:
 - **`reasoning_content` passback** — stores and re-injects `reasoning_content` across
   multi-turn tool calls, preventing 400 errors
 
-Also works as a lightweight reasoning_content passback layer for OpenAI-native clients
-(Codex CLI, Cursor, etc.) via `/v1/chat/completions`.
-
 ## The Problem
 
-**For Claude Code specifically:** Two layers of incompatibility with DeepSeek:
+Claude Code + OpenRouter + DeepSeek V4 thinking mode hits two incompatibilities:
+
 1. Claude Code speaks Anthropic protocol, but OpenRouter serves DeepSeek via OpenAI format
 2. DeepSeek V4 (and V3.2+) thinking mode requires `reasoning_content` from an
    assistant turn with tool calls to be passed back verbatim in every subsequent
    request. No client does this automatically → **400 error** on the 2nd+ turn.
-
-**For OpenAI-native clients:** Only issue #2 applies — they already speak the
-right protocol, but still need a layer that preserves `reasoning_content`.
 
 ## What It Does
 
@@ -68,21 +63,11 @@ node src/server.js --port=8080
 
 ## Claude Code config
 
-Claude Code speaks Anthropic protocol — point it to `/v1/messages`:
+Point Claude Code to the proxy's `/v1/messages` endpoint:
 
 ```
 Base URL: http://localhost:3000/v1/messages
 API Key:  (your OpenRouter key — passed through to upstream)
-Model:    deepseek/deepseek-v4-flash
-```
-
-## OpenAI-compatible clients
-
-Clients that speak OpenAI format (Codex CLI, Cursor, etc.) use `/v1/chat/completions`:
-
-```
-Base URL: http://localhost:3000/v1/chat/completions
-API Key:  (your OpenRouter key)
 Model:    deepseek/deepseek-v4-flash
 ```
 
@@ -91,18 +76,17 @@ Model:    deepseek/deepseek-v4-flash
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| POST | `/v1/messages` | Anthropic format (Claude Code) |
-| POST | `/v1/chat/completions` | OpenAI format (Codex CLI, Cursor, etc.) |
+| POST | `/v1/messages` | Anthropic format — Claude Code's endpoint |
 | DELETE | `/session/:sessionId` | Clear a session's reasoning store |
 | GET | `/sessions` | List active sessions |
 
 ## Architecture
 
 ```
-Client → proxy-deepseek → OpenRouter → DeepSeek
-           ↑
-     intercept response
-     store reasoning_content (keyed by tool_call.id)
-           ↓
-     next request: inject stored reasoning_content
+Claude Code → proxy-deepseek → OpenRouter → DeepSeek
+                ↑
+          intercept response
+          store reasoning_content (keyed by tool_call.id)
+                ↓
+          next request: inject stored reasoning_content
 ```

@@ -3,7 +3,6 @@
  * 
  * Local proxy server that:
  * 1. Accepts requests in Anthropic /v1/messages format (Claude Code)
- *    and OpenAI /v1/chat/completions format.
  * 2. Transforms them to OpenAI /v1/chat/completions for OpenRouter.
  * 3. Handles DeepSeek V4 thinking-mode reasoning_content preservation
  *    across multi-turn conversations.
@@ -187,30 +186,16 @@ function openAIResponseToAnthropic(openAIResp, model) {
   };
 }
 
-// ─── Core: unified proxy-to-upstream ───────────────────────────────────────
+// ─── Core: proxy-to-upstream ────────────────────────────────────────────────
 
 /**
- * Unified proxy function shared by both /v1/chat/completions and /v1/messages.
- *
- * @param {Request}  req    - Express request
- * @param {Response} res    - Express response
- * @param {Object}   opts
- * @param {string}   opts.targetUrl             - upstream URL
- * @param {string}   opts.apiKey                - authorization key
- * @param {Object}   opts.requestBody           - request body (already in OpenAI format)
- * @param {string}   opts.model                 - model name
- * @param {boolean}  opts.isStreaming           - whether this is a streaming request
- * @param {string}   opts.sessionId             - session identifier
- * @param {Function} [opts.streamConverterFactory] - (model) => converter with .convert(chunk) -> string[]
- *                                                   Pass null for SSE passthrough (OpenAI paths)
- * @param {Function} [opts.responseTransformer] - (openAIJson, model) => response for non-streaming
- *                                                 Pass null for passthrough (OpenAI paths)
+ * Proxy an Anthropic-format request to the OpenAI-compatible upstream.
+ * Handles Anthropic→OpenAI conversion, reasoning_content passback, and
+ * OpenAI→Anthropic response conversion (both streaming and non-streaming).
  */
 async function proxyToUpstream(req, res, {
   targetUrl, apiKey, requestBody, model,
   isStreaming, sessionId,
-  streamConverterFactory,
-  responseTransformer,
 }) {
   const store = getOrCreateSession(sessionId);
   const transformer = getTransformer(store);
@@ -266,14 +251,14 @@ async function proxyToUpstream(req, res, {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Request-Session', sessionId);
 
-      const converter = streamConverterFactory ? streamConverterFactory(model) : null;
+      const converter = new StreamingConverter(model);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       let chunkCount = 0;
       let errorCount = 0;
 
-      /** Process a single parsed SSE chunk — handles both passthrough and conversion */
+      /** Process a single parsed SSE chunk */
       function processChunk(chunk) {
         chunkCount++;
         try {
@@ -281,17 +266,11 @@ async function proxyToUpstream(req, res, {
           if (needsTransform) {
             transformer.transformStreamingChunk(chunk);
           }
-
-          if (converter) {
-            // Convert OpenAI SSE → Anthropic SSE (with event: lines)
-            const events = converter.convert(chunk);
-            for (const event of events) {
-              const parsed = JSON.parse(event);
-              res.write(`event: ${parsed.type}\ndata: ${event}\n\n`);
-            }
-          } else {
-            // Passthrough: relay the raw OpenAI SSE chunk
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          // Convert OpenAI SSE → Anthropic SSE (with event: lines)
+          const events = converter.convert(chunk);
+          for (const event of events) {
+            const parsed = JSON.parse(event);
+            res.write(`event: ${parsed.type}\ndata: ${event}\n\n`);
           }
         } catch (e) {
           errorCount++;
@@ -315,15 +294,18 @@ async function proxyToUpstream(req, res, {
                 }
               }
             }
-            // Ensure stop sequence for Anthropic conversion (all blocks)
-            if (converter && !converter.sentMessageStop) {
-              for (const block of converter._blocks) {
-                if (!converter._stopped.has(block.index)) {
-                  converter._stopped.add(block.index);
-                  res.write(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${block.index}}\n\n`);
-                }
+            // Stop all content blocks that haven't been stopped yet
+            for (const block of converter._blocks) {
+              if (!converter._stopped.has(block.index)) {
+                converter._stopped.add(block.index);
+                res.write(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${block.index}}\n\n`);
               }
+            }
+            if (!converter.sentMessageDelta) {
               res.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n');
+            }
+            if (!converter.sentMessageStop) {
+              converter.sentMessageStop = true;
               res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
             }
             res.write('data: [DONE]\n\n');
@@ -337,19 +319,16 @@ async function proxyToUpstream(req, res, {
             if (!line.startsWith('data: ')) continue;
             const data = line.slice(6).trim();
             if (data === '[DONE]') {
-              if (converter && !converter.sentMessageStop) {
-                for (const block of converter._blocks) {
-                  if (!converter._stopped.has(block.index)) {
-                    converter._stopped.add(block.index);
-                    res.write(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${block.index}}\n\n`);
-                  }
+              for (const block of converter._blocks) {
+                if (!converter._stopped.has(block.index)) {
+                  converter._stopped.add(block.index);
+                  res.write(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${block.index}}\n\n`);
                 }
-                res.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n');
-                res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
               }
+              res.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n');
+              res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
               res.write('data: [DONE]\n\n');
               res.end();
-              reader.cancel().catch(() => {});
               return;
             }
             try {
@@ -358,8 +337,7 @@ async function proxyToUpstream(req, res, {
               console.error('[DEBUG SSE parse error]', e.message);
             }
           }
-          if (converter && converter.sentMessageStop) {
-            reader.cancel().catch(() => {});
+          if (converter.sentMessageStop) {
             res.end();
             return;
           }
@@ -382,11 +360,7 @@ async function proxyToUpstream(req, res, {
       }
 
       res.setHeader('X-Request-Session', sessionId);
-      if (responseTransformer) {
-        res.json(responseTransformer(json, model));
-      } else {
-        res.json(json);
-      }
+      res.json(openAIResponseToAnthropic(json, model));
     }
 
   } catch (err) {
@@ -419,31 +393,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', sessions: sessions.size, uptime: process.uptime() });
 });
 
-// ── OpenAI /v1/chat/completions ─────────────────────────────────────────────
-app.post('/v1/chat/completions', async (req, res) => {
-  // API key: pass through from client (Authorization header), .env as fallback
-  const apiKey = req.headers['authorization']?.replace('Bearer ', '')
-              || UPSTREAM_API_KEY
-              || '';
-  const requestBody = req.body;
-  const isStreaming = requestBody.stream === true;
-
-  console.log(`[DEBUG] /v1/chat/completions model=${requestBody.model}, stream=${isStreaming}`);
-
-  await proxyToUpstream(req, res, {
-    targetUrl: UPSTREAM_URL,
-    apiKey,
-    requestBody,
-    model: requestBody.model || '',
-    isStreaming,
-    sessionId: resolveSessionId(req),
-    // OpenAI path: passthrough (no conversion needed)
-    streamConverterFactory: null,
-    responseTransformer: null,
-  });
-});
-
-// ── Anthropic /v1/messages (Claude Code primary endpoint) ──────────────────
+// ── Anthropic /v1/messages (Claude Code endpoint) ───────────────────────────
 app.post('/v1/messages', async (req, res) => {
   // API key: pass through from client (x-api-key or Authorization), .env as fallback
   const apiKey = req.headers['x-api-key']
@@ -465,8 +415,6 @@ app.post('/v1/messages', async (req, res) => {
     model,
     isStreaming,
     sessionId: resolveSessionId(req),
-    streamConverterFactory: (m) => new StreamingConverter(m),
-    responseTransformer: openAIResponseToAnthropic,
   });
 });
 
