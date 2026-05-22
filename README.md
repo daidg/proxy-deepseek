@@ -7,13 +7,23 @@ when using Claude Code, Codex CLI, or any OpenAI-compatible client via OpenRoute
 
 DeepSeek V4 (and V3.2+) thinking mode requires that `reasoning_content` from
 an assistant turn with tool calls is passed back verbatim in every subsequent
-request. OpenAI-compatible clients (Claude Code, Codex CLI, etc.) don't do this
-automatically → **400 error** on the 2nd+ turn.
+request. OpenAI-compatible clients don't do this automatically → **400 error**
+on the 2nd+ turn.
 
-## The Fix
+Additionally, DeepSeek's API has stricter message format requirements than
+OpenAI's — `content: null` with `tool_calls` is rejected, and Anthropic-format
+messages (used by Claude Code) must be converted to OpenAI format.
 
-This proxy intercepts responses, stores `reasoning_content` by tool_call ID,
-and re-injects it on the next turn — exactly like CCR PR #1376.
+## What It Does
+
+| Transformation | Description |
+|---|---|
+| `reasoning_content` preservation | Stores reasoning from responses and re-injects on subsequent turns |
+| `content: null` fix | Converts `null` content to `""` on assistant messages with tool_calls |
+| Anthropic → OpenAI conversion | Translates `/v1/messages` (Anthropic format) to `/v1/chat/completions` (OpenAI format) |
+| `[TOOL_CALLS_START]` → `role:tool` | Converts Claude Code's user-format tool results to OpenAI `role:tool` messages |
+| Tools format normalization | Adds missing `type: "function"` wrapper to Claude Code's tool definitions |
+| SSE streaming conversion | Translates OpenAI streaming chunks to Anthropic SSE event format |
 
 ## Setup
 
@@ -25,20 +35,34 @@ Edit `.env`:
 
 ```
 UPSTREAM_URL=https://openrouter.ai/api/v1/chat/completions
-UPSTREAM_API_KEY=sk-or-v1-xxxxx
+UPSTREAM_API_KEY=***
 UPSTREAM_MODEL=deepseek/deepseek-v4-flash
-PORT=3000
+DEBUG=0
 ```
 
 ## Run
 
 ```bash
+# Default port 3000
 node src/server.js
+
+# Custom port
+node src/server.js --port=8080
 ```
 
 ## Claude Code config
 
-In your OpenAI provider settings, point to the proxy:
+Claude Code speaks Anthropic protocol — point it to `/v1/messages`:
+
+```
+Base URL: http://localhost:3000/v1/messages
+API Key:  (your OpenRouter key — passed through to upstream)
+Model:    deepseek/deepseek-v4-flash
+```
+
+## OpenAI-compatible clients
+
+Clients that speak OpenAI format (Codex CLI, Cursor, etc.) use `/v1/chat/completions`:
 
 ```
 Base URL: http://localhost:3000/v1/chat/completions
@@ -46,15 +70,13 @@ API Key:  (your OpenRouter key)
 Model:    deepseek/deepseek-v4-flash
 ```
 
-Or if using CCR (Claude Code Router), update its upstream to `http://localhost:3000`.
-
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| POST | `/v1/chat/completions` | OpenAI format proxy |
 | POST | `/v1/messages` | Anthropic format (Claude Code) |
+| POST | `/v1/chat/completions` | OpenAI format (Codex CLI, Cursor, etc.) |
 | DELETE | `/session/:sessionId` | Clear a session's reasoning store |
 | GET | `/sessions` | List active sessions |
 
