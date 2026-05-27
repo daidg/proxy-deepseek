@@ -78,7 +78,25 @@ function resolveSessionId(req) {
   );
 }
 
-// ─── Message format conversion ─────────────────────────────────────────────
+// ─── Model name mapping ──────────────────────────────────────────────────────
+
+/**
+ * Map an OpenRouter model name to a Claude Code-compatible model name.
+ * Claude Code uses `[1m]` suffix in the model name to determine context window.
+ * Without it, Claude Code defaults to 200K regardless of the actual model.
+ *
+ * @param {string} model - model name from OpenRouter (e.g. "deepseek/deepseek-v4-pro")
+ * @returns {string} - model name for Claude Code (e.g. "deepseek-v4-pro[1m]")
+ */
+function toClaudeModel(model) {
+  if (!model) return '';
+  // Strip OpenRouter prefix and add [1m] for deepseek-v4 models
+  const m = model.replace(/^deepseek\//, '');
+  if (m.includes('deepseek-v4')) {
+    return m + '[1m]';
+  }
+  return m;
+}
 
 /**
  * Convert Anthropic /v1/messages format to OpenAI /v1/chat/completions format.
@@ -175,7 +193,7 @@ function openAIResponseToAnthropic(openAIResp, model) {
     id: openAIResp.id || `msg_${Date.now()}`,
     type: 'message',
     role: 'assistant',
-    model: openAIResp.model || model,
+    model: toClaudeModel(openAIResp.model || model),
     content,
     stop_reason: stopReason,
     stop_sequence: null,
@@ -194,7 +212,7 @@ function openAIResponseToAnthropic(openAIResp, model) {
  * OpenAI→Anthropic response conversion (both streaming and non-streaming).
  */
 async function proxyToUpstream(req, res, {
-  targetUrl, apiKey, requestBody, model,
+  targetUrl, apiKey, requestBody, model, claudeModel,
   isStreaming, sessionId,
 }) {
   const store = getOrCreateSession(sessionId);
@@ -251,7 +269,7 @@ async function proxyToUpstream(req, res, {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Request-Session', sessionId);
 
-      const converter = new StreamingConverter(model);
+      const converter = new StreamingConverter(claudeModel);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -407,12 +425,14 @@ app.post('/v1/messages', async (req, res) => {
   // Convert Anthropic → OpenAI format
   const openAIBody = anthropicToOpenAI(req.body);
   const model = openAIBody.model || '';
+  const claudeModel = toClaudeModel(model);
 
   await proxyToUpstream(req, res, {
     targetUrl: UPSTREAM_URL,
     apiKey,
     requestBody: openAIBody,
     model,
+    claudeModel,
     isStreaming,
     sessionId: resolveSessionId(req),
   });
