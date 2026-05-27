@@ -66,6 +66,7 @@ class DeepSeekTransformer {
     // that have stored reasoning. DeepSeek requires reasoning_content on every
     // assistant(tool_calls) message in the history, not just the last one.
     const stored = this.store.getAll();
+    if (DEBUG) console.log(`[DEBUG transformOutbound] storedReasoning size=${stored.size} keys=[${[...stored.keys()].join(',')}]`);
     if (stored.size === 0) return messages;
 
     messages = messages.map(msg => {
@@ -80,11 +81,14 @@ class DeepSeekTransformer {
         }
       }
 
+      if (DEBUG) console.log(`[DEBUG transformOutbound] assistant[${msg.tool_calls?.map(t=>t.id)?.join(',')}] matched ${reasoningContents.length} reasoning(s)`);
+
       if (reasoningContents.length === 0) return msg;
 
       // Merge all reasoning into one (take longest)
       const reasoning = reasoningContents.sort((a, b) => b.length - a.length)[0];
 
+      if (DEBUG) console.log(`[DEBUG transformOutbound] INJECTED reasoning_content (${reasoning.length} chars)`);
       return { ...msg, reasoning_content: reasoning };
     });
 
@@ -103,12 +107,13 @@ class DeepSeekTransformer {
     const assistantMessage = response.choices?.[0]?.message;
     if (!assistantMessage) return response;
 
-    const { reasoning_content, tool_calls } = assistantMessage;
+    const rc = assistantMessage.reasoning_content || assistantMessage.reasoning;
+    const { tool_calls } = assistantMessage;
     
-    if (tool_calls?.length && reasoning_content) {
+    if (tool_calls?.length && rc) {
       for (const tc of tool_calls) {
         if (tc.id) {
-          this.store.save(tc.id, reasoning_content);
+          this.store.save(tc.id, rc);
         }
       }
     }
@@ -128,9 +133,18 @@ class DeepSeekTransformer {
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) return chunk;
 
-    // Accumulate reasoning_content — it arrives before or between tool_call chunks
-    if (delta.reasoning_content) {
-      this._pendingReasoning = (this._pendingReasoning || '') + delta.reasoning_content;
+    if (DEBUG) {
+      const deltaKeys = Object.keys(delta);
+      const hasRC = !!delta.reasoning_content;
+      const hasTC = delta.tool_calls?.length > 0;
+      if (hasRC || hasTC) {
+        console.log(`[DEBUG streamChunk] delta keys=${deltaKeys.join(',')} hasRC=${hasRC} hasTC=${hasTC} pendingRC=${(this._pendingReasoning || '').length} toolIds=${delta.tool_calls?.map(t=>t.id)?.join(',')||'none'}`);
+      }
+    }
+
+    // Accumulate reasoning_content — arrives as delta.reasoning in DeepSeek V4 chunks
+    if (delta.reasoning) {
+      this._pendingReasoning = (this._pendingReasoning || '') + delta.reasoning;
     }
 
     // When tool_calls arrive, associate accumulated reasoning_content
@@ -138,6 +152,7 @@ class DeepSeekTransformer {
       for (const tc of delta.tool_calls) {
         if (tc.id) {
           this.store.save(tc.id, this._pendingReasoning);
+          if (DEBUG) console.log(`[DEBUG streamChunk] SAVED reasoning_content (${this._pendingReasoning.length} chars) for tool_call ${tc.id}`);
         }
       }
     }
@@ -284,13 +299,13 @@ class StreamingConverter {
       }
     }
 
-    // ── 4. reasoning_content (DeepSeek extended thinking) ─────────────────
-    if (delta?.reasoning_content) {
+    // ── 4. reasoning (DeepSeek V4 thinking — arrives as delta.reasoning via OpenRouter)
+    if (delta?.reasoning) {
       const block = this._ensureBlock('text');
       events.push(JSON.stringify({
         type: 'content_block_delta',
         index: block.index,
-        delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+        delta: { type: 'thinking_delta', thinking: delta.reasoning }
       }));
     }
 

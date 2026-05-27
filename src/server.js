@@ -298,6 +298,9 @@ async function proxyToUpstream(req, res, {
       /** Process a single parsed SSE chunk */
       function processChunk(chunk) {
         chunkCount++;
+        if (chunkCount <= 2) {
+          console.log(`[DEBUG rawChunk#${chunkCount}]`, JSON.stringify(chunk).slice(0, 500));
+        }
         try {
           // Phase 2: Store reasoning_content from streaming chunks
           if (needsTransform) {
