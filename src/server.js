@@ -81,16 +81,35 @@ function resolveSessionId(req) {
 // ─── Model name mapping ──────────────────────────────────────────────────────
 
 /**
- * Map an OpenRouter model name to a Claude Code-compatible model name.
- * Claude Code uses `[1m]` suffix in the model name to determine context window.
- * Without it, Claude Code defaults to 200K regardless of the actual model.
+ * Normalize a model name from Claude Code for OpenRouter.
+ * Claude Code may send model names like "deepseek-v4-pro[1m]" (the [1m] suffix
+ * tells Claude Code the context window is 1M tokens). OpenRouter expects
+ * "deepseek/deepseek-v4-pro" — strip [1m] and ensure the deepseek/ prefix.
+ *
+ * @param {string} model - model name from Claude Code
+ * @returns {string} - model name for OpenRouter
+ */
+function toOpenRouterModel(model) {
+  if (!model) return '';
+  // Strip [1m] suffix if present
+  let m = model.replace(/\[1m\]$/, '');
+  // Add OpenRouter prefix if missing
+  if (!m.startsWith('deepseek/')) {
+    m = 'deepseek/' + m;
+  }
+  return m;
+}
+
+/**
+ * Map an OpenRouter model name back to Claude Code format.
+ * Strips the deepseek/ prefix and adds [1m] for deepseek-v4 models
+ * so Claude Code detects the 1M context window.
  *
  * @param {string} model - model name from OpenRouter (e.g. "deepseek/deepseek-v4-pro")
  * @returns {string} - model name for Claude Code (e.g. "deepseek-v4-pro[1m]")
  */
 function toClaudeModel(model) {
   if (!model) return '';
-  // Strip OpenRouter prefix and add [1m] for deepseek-v4 models
   const m = model.replace(/^deepseek\//, '');
   if (m.includes('deepseek-v4')) {
     return m + '[1m]';
@@ -134,8 +153,8 @@ function anthropicToOpenAI(anthropicBody) {
   ];
   console.log(`[DEBUG anthropicToOpenAI] messages: ${messages.length} → ${converted.length} after Anthropic→OpenAI conversion`);
 
-  // Route to DeepSeek model — prefer UPSTREAM_MODEL env, keep original model as fallback
-  const targetModel = UPSTREAM_MODEL || model;
+  // Route to DeepSeek model — normalize and prefer UPSTREAM_MODEL env
+  const targetModel = UPSTREAM_MODEL || toOpenRouterModel(model);
   console.log(`[DEBUG anthropicToOpenAI] input model=${model}, targetModel=${targetModel}`);
 
   return {
