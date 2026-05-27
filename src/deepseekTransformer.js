@@ -118,21 +118,26 @@ class DeepSeekTransformer {
 
   /**
    * Streaming Phase 2: Extract from streaming chunks.
-   * DeepSeek streams reasoning_content in a delta under tool_call chunks.
+   * DeepSeek streams reasoning_content and tool_calls in SEPARATE delta chunks.
+   * We accumulate reasoning_content and associate it with tool_calls by their ID.
    *
    * @param {Object} chunk - SSE chunk from streaming response
-   * @returns {Object} chunk with potentially updated reasoning_content
+   * @returns {Object} chunk unchanged
    */
   transformStreamingChunk(chunk) {
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) return chunk;
 
-    const { reasoning_content, tool_calls } = delta;
+    // Accumulate reasoning_content — it arrives before or between tool_call chunks
+    if (delta.reasoning_content) {
+      this._pendingReasoning = (this._pendingReasoning || '') + delta.reasoning_content;
+    }
 
-    if (tool_calls?.length && reasoning_content) {
-      for (const tc of tool_calls) {
+    // When tool_calls arrive, associate accumulated reasoning_content
+    if (delta.tool_calls?.length && this._pendingReasoning) {
+      for (const tc of delta.tool_calls) {
         if (tc.id) {
-          this.store.save(tc.id, reasoning_content);
+          this.store.save(tc.id, this._pendingReasoning);
         }
       }
     }
