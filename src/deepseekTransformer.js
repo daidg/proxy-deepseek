@@ -62,47 +62,31 @@ class DeepSeekTransformer {
     // Pass 2: Convert Claude Code's [TOOL_CALLS_START] user messages to OpenAI role:tool messages.
     messages = convertToolResults(messages);
 
-    // Now find the last assistant message with tool_calls (post-fix)
+    // Inject reasoning_content into ALL assistant messages with tool_calls
+    // that have stored reasoning. DeepSeek requires reasoning_content on every
+    // assistant(tool_calls) message in the history, not just the last one.
     const stored = this.store.getAll();
-    let lastAssistantIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant' && messages[i].tool_calls?.length) {
-        lastAssistantIdx = i;
-        break;
+    if (stored.size === 0) return messages;
+
+    messages = messages.map(msg => {
+      if (msg.role !== 'assistant' || !msg.tool_calls?.length) return msg;
+
+      // Collect reasoning_content for this message's tool_calls
+      const reasoningContents = [];
+      for (const tc of msg.tool_calls) {
+        if (tc.id) {
+          const rc = stored.get(tc.id);
+          if (rc) reasoningContents.push(rc);
+        }
       }
-    }
 
-    if (lastAssistantIdx === -1) return messages;
+      if (reasoningContents.length === 0) return msg;
 
-    // Only inject reasoning_content if the assistant message is the LAST message.
-    // If followed by a user tool_result message, the tool_result completes
-    // the turn without needing reasoning_content.
-    if (lastAssistantIdx < messages.length - 1) {
-      return messages;
-    }
+      // Merge all reasoning into one (take longest)
+      const reasoning = reasoningContents.sort((a, b) => b.length - a.length)[0];
 
-    const lastAssistant = messages[lastAssistantIdx];
-
-    // Collect all reasoning_content for this turn's tool_calls
-    const reasoningContents = [];
-    for (const tc of lastAssistant.tool_calls) {
-      if (tc.id) {
-        const rc = stored.get(tc.id);
-        if (rc) reasoningContents.push(rc);
-      }
-    }
-
-    if (reasoningContents.length === 0) return messages;
-
-    // Merge all reasoning into one (take longest)
-    const reasoning = reasoningContents.sort((a, b) => b.length - a.length)[0];
-
-    // Inject reasoning_content at the TOP LEVEL of the assistant message.
-    messages = [...messages];
-    messages[lastAssistantIdx] = {
-      ...lastAssistant,
-      reasoning_content: reasoning,
-    };
+      return { ...msg, reasoning_content: reasoning };
+    });
 
     return messages;
   }
